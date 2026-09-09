@@ -1,0 +1,6 @@
+video_path,label,start_sec,end_sec,subject
+data/raw/urfall/fall-01.mp4,1,0,8,subject_01
+data/raw/urfall/adl-01.mp4,0,0,12,subject_01
+data/raw/local/sofa_sleep.mp4,0,0,30,subject_local_01
+data/raw/local/pick_object.mp4,0,0,15,subject_local_02
+

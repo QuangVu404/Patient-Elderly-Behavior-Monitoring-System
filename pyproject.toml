@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eldercare-monitor"
+version = "0.1.0"
+description = "CPU-first real-time pose monitoring for falls and prolonged immobility"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24,<3",
+  "opencv-python>=4.8",
+  "PyYAML>=6.0",
+  "ultralytics>=8.3",
+]
+
+[project.optional-dependencies]
+train = ["torch>=2.2", "onnx>=1.15"]
+openvino = ["openvino>=2025.0", "nncf>=2.16"]
+dev = ["pytest>=8", "ruff>=0.9"]
+
+[project.scripts]
+eldercare-monitor = "eldercare_monitor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+

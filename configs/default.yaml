@@ -1,0 +1,34 @@
+video:
+  source: 0                    # webcam index, video path, or RTSP URL
+  width: 640
+  height: 384
+  process_every_n_frames: 1
+  display: true
+
+detector:
+  model: yolo8n-pose.pt
+  device: cpu
+  image_size: 416
+  confidence: 0.30
+  iou: 0.50
+  tracker: bytetrack.yaml
+
+sequence:
+  length: 32
+  minimum_frames: 12
+  keypoint_confidence: 0.25
+  stale_track_seconds: 2.0
+
+analysis:
+  classifier_model: null       # OpenVINO .xml; null enables the heuristic baseline
+  fall_threshold: 0.72
+  confirm_frames: 3
+  cooldown_seconds: 15.0
+  immobility_seconds: 30.0
+  immobility_motion_threshold: 0.018
+  horizontal_aspect_ratio: 0.95
+
+output:
+  events_jsonl: artifacts/events.jsonl
+  snapshots_dir: artifacts/snapshots
+  save_snapshots: false        # keep false unless consent/privacy policy permits storage

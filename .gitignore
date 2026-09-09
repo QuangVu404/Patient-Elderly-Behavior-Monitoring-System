@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+artifacts/
+data/raw/
+data/processed/
+*.mp4
+*.avi
+*.onnx
+*.pt
+*_openvino_model/
+
