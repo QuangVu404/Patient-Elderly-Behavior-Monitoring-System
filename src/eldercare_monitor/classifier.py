@@ -47,3 +47,45 @@ class OpenVinoFallClassifier:
         logits = logits - np.max(logits)
         probability = np.exp(logits) / np.exp(logits).sum()
         return float(probability[1])
+
+
+class TorchFallClassifier:
+    """PyTorch runtime fallback for a stage-07 temporal checkpoint."""
+
+    def __init__(self, model_path: str, device: str = "cpu"):
+        try:
+            import torch
+        except ImportError as exc:
+            raise RuntimeError("Install PyTorch support: pip install -e .[train]") from exc
+
+        from .model import build_temporal_model
+
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        required = {"state_dict", "model_name", "input_dim", "hidden_dim"}
+        missing = required.difference(checkpoint)
+        if missing:
+            raise ValueError(f"Temporal checkpoint is missing fields: {sorted(missing)}")
+        self.torch = torch
+        self.device = device
+        self.model = build_temporal_model(
+            str(checkpoint["model_name"]),
+            int(checkpoint["input_dim"]),
+            int(checkpoint["hidden_dim"]),
+        ).to(device)
+        self.model.load_state_dict(checkpoint["state_dict"])
+        self.model.eval()
+
+    def predict(self, features: np.ndarray) -> float:
+        tensor = self.torch.from_numpy(features[None].astype(np.float32)).to(self.device)
+        with self.torch.inference_mode():
+            probability = self.torch.softmax(self.model(tensor), dim=1)[0, 1]
+        return float(probability.cpu())
+
+
+def load_fall_classifier(model_path: str) -> FallClassifier:
+    suffix = str(model_path).lower()
+    if suffix.endswith(".xml"):
+        return OpenVinoFallClassifier(model_path)
+    if suffix.endswith((".pt", ".pth")):
+        return TorchFallClassifier(model_path)
+    raise ValueError(f"Unsupported classifier model format: {model_path}")

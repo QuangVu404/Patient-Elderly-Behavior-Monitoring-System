@@ -1,0 +1,7 @@
+dataset,path,label,group,source_type,segments
+FallVision,Fall/Raw_Video/video_001.mp4,1,fallvision_subject_01,video,
+FallVision,No_Fall/Raw_Video/video_002.mp4,0,fallvision_subject_02,video,
+CAUCAFall,Subject_01/FallBackwards/FallBackwardsS1,1,caucafall_subject_01,images,
+URFD,UR_fall_detection_dataset_cam0_rgb/fall-01-cam0-rgb,1,urfd_fall_01,images,
+MCFD,dataset/chute01/cam1.avi,1,mcfd_scenario_01,video,
+UCF101,train/WalkingWithDog/v_WalkingWithDog_g01_c01.avi,0,ucf101_group_01,video,

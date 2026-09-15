@@ -11,7 +11,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from eldercare_monitor.features import FEATURE_DIM
-from eldercare_monitor.model import TemporalAttention1D
+from eldercare_monitor.model import MultiScaleTemporalGRU
 
 
 def group_split(groups: np.ndarray, validation_fraction: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
@@ -54,8 +54,8 @@ def main() -> None:
     parser.add_argument("--output", default="artifacts/temporal_attention.pt")
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=2e-3)
-    parser.add_argument("--hidden-dim", type=int, default=64)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--hidden-dim", type=int, default=96)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -74,11 +74,16 @@ def main() -> None:
         shuffle=True,
     )
     val_x, val_y = torch.from_numpy(x[val_mask]), torch.from_numpy(y[val_mask])
-    model = TemporalAttention1D(FEATURE_DIM, args.hidden_dim)
+    model = MultiScaleTemporalGRU(FEATURE_DIM, args.hidden_dim)
     class_counts = np.bincount(y[train_mask], minlength=2)
     weights = len(y[train_mask]) / np.maximum(class_counts * 2, 1)
-    criterion = nn.CrossEntropyLoss(weight=torch.tensor(weights, dtype=torch.float32))
+    criterion = nn.CrossEntropyLoss(
+        weight=torch.tensor(weights, dtype=torch.float32), label_smoothing=0.05
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-3)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(args.epochs, 1)
+    )
 
     best_f1, best_state, best_metrics = -1.0, None, {}
     for epoch in range(args.epochs):
@@ -87,7 +92,9 @@ def main() -> None:
             optimizer.zero_grad(set_to_none=True)
             loss = criterion(model(batch_x), batch_y)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+        scheduler.step()
         model.eval()
         with torch.no_grad():
             predictions = model(val_x).argmax(1).numpy()
@@ -109,6 +116,7 @@ def main() -> None:
     torch.save(
         {
             "state_dict": best_state,
+            "model_name": "MultiScaleTemporalGRU",
             "input_dim": FEATURE_DIM,
             "hidden_dim": args.hidden_dim,
             "sequence_length": x.shape[1],

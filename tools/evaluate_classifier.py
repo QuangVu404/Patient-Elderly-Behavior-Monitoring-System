@@ -6,7 +6,7 @@ import json
 import numpy as np
 import torch
 
-from eldercare_monitor.model import TemporalAttention1D
+from eldercare_monitor.model import build_temporal_model
 
 
 def main() -> None:
@@ -16,7 +16,10 @@ def main() -> None:
     parser.add_argument("--threshold", type=float, help="Default: checkpoint recommendation or 0.5")
     args = parser.parse_args()
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
-    model = TemporalAttention1D(checkpoint["input_dim"], checkpoint["hidden_dim"])
+    model = build_temporal_model(
+        checkpoint.get("model_name", "TemporalAttention1D"),
+        checkpoint["input_dim"], checkpoint["hidden_dim"]
+    )
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
     dataset = np.load(args.dataset, allow_pickle=False)

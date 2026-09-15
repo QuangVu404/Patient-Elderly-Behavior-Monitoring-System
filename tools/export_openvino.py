@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from eldercare_monitor.model import TemporalAttention1D
+from eldercare_monitor.model import build_temporal_model
 
 
 def main() -> None:
@@ -22,7 +22,10 @@ def main() -> None:
         raise RuntimeError("Install export dependencies: pip install -e .[train,openvino]") from exc
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
-    model = TemporalAttention1D(checkpoint["input_dim"], checkpoint["hidden_dim"])
+    model = build_temporal_model(
+        checkpoint.get("model_name", "TemporalAttention1D"),
+        checkpoint["input_dim"], checkpoint["hidden_dim"]
+    )
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
     example = torch.zeros(1, checkpoint["sequence_length"], checkpoint["input_dim"])
@@ -45,4 +48,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

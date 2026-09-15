@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 
 from .analyzer import RiskAnalyzer
-from .classifier import HeuristicFallClassifier, OpenVinoFallClassifier
+from .classifier import HeuristicFallClassifier, OpenVinoFallClassifier, TorchFallClassifier
 from .config import AppConfig
 from .detector import UltralyticsPoseTracker
 from .events import EventSink
@@ -19,20 +19,58 @@ class MonitorPipeline:
     def __init__(self, config: AppConfig):
         self.config = config
         self.tracker = UltralyticsPoseTracker(config.detector)
+        # The learned classifier is trained only on complete fixed-length windows.
+        # Keep the shorter bootstrap path exclusively for the heuristic classifier.
+        minimum_frames = (
+            config.sequence.length
+            if config.analysis.classifier_model
+            else config.sequence.minimum_frames
+        )
         self.store = SequenceStore(
             config.sequence.length,
-            config.sequence.minimum_frames,
+            minimum_frames,
             config.sequence.keypoint_confidence,
             config.sequence.stale_track_seconds,
         )
-        classifier = (
-            OpenVinoFallClassifier(config.analysis.classifier_model)
-            if config.analysis.classifier_model
-            else HeuristicFallClassifier()
-        )
+        if not config.analysis.classifier_model:
+            classifier = HeuristicFallClassifier()
+        elif config.analysis.classifier_model.lower().endswith(".xml"):
+            classifier = OpenVinoFallClassifier(config.analysis.classifier_model)
+        else:
+            classifier = TorchFallClassifier(config.analysis.classifier_model)
         self.analyzer = RiskAnalyzer(config.analysis, classifier)
         self.sink = EventSink(config.output)
         self.recent_events: dict[int, deque[RiskEvent]] = defaultdict(lambda: deque(maxlen=1))
+        self._last_sample_at: float | None = None
+
+    def process_frame(
+        self,
+        frame: np.ndarray,
+        now: float | None = None,
+        fps: float = 0.0,
+    ) -> tuple[np.ndarray, list[RiskEvent]]:
+        """Process one frame for CLI or UI integrations."""
+        now = time.monotonic() if now is None else now
+        sample_interval = 1.0 / max(self.config.sequence.sample_fps, 1e-6)
+        if (
+            self._last_sample_at is not None
+            and now >= self._last_sample_at
+            and now - self._last_sample_at < sample_interval * 0.95
+        ):
+            return frame.copy(), []
+        self._last_sample_at = now
+        poses = self.tracker(frame, now)
+        self.analyzer.prune(now, self.config.sequence.stale_track_seconds)
+        events: list[RiskEvent] = []
+        for pose in poses:
+            window = self.store.update(pose)
+            if window is not None:
+                detected = self.analyzer.update(pose.track_id, window, now)
+                for event in detected:
+                    self.recent_events[pose.track_id].append(event)
+                    self.sink.emit(event, frame)
+                events.extend(detected)
+        return self._draw(frame, poses, fps), events
 
     def run(self) -> None:
         cap = cv2.VideoCapture(self.config.video.source)
@@ -42,6 +80,10 @@ class MonitorPipeline:
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.video.height)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         frame_index, fps, last_tick = 0, 0.0, time.perf_counter()
+        source_fps = cap.get(cv2.CAP_PROP_FPS) or self.config.sequence.sample_fps
+        live_source = isinstance(self.config.video.source, int) or str(
+            self.config.video.source
+        ).lower().startswith(("rtsp://", "rtmp://", "http://", "https://"))
         try:
             while True:
                 ok, frame = cap.read()
@@ -50,20 +92,17 @@ class MonitorPipeline:
                 frame_index += 1
                 if frame_index % self.config.video.process_every_n_frames:
                     continue
-                now = time.monotonic()
-                poses = self.tracker(frame, now)
-                self.analyzer.prune(now, self.config.sequence.stale_track_seconds)
-                for pose in poses:
-                    window = self.store.update(pose)
-                    if window is not None:
-                        for event in self.analyzer.update(pose.track_id, window, now):
-                            self.recent_events[pose.track_id].append(event)
-                            self.sink.emit(event, frame)
+                media_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+                now = (
+                    time.monotonic()
+                    if live_source
+                    else media_time if media_time > 0 else (frame_index - 1) / source_fps
+                )
                 elapsed = time.perf_counter() - last_tick
                 instant_fps = 1.0 / max(elapsed, 1e-6)
                 fps = instant_fps if fps == 0 else 0.90 * fps + 0.10 * instant_fps
                 last_tick = time.perf_counter()
-                annotated = self._draw(frame, poses, fps)
+                annotated, _ = self.process_frame(frame, now, fps)
                 if self.config.video.display:
                     cv2.imshow("Eldercare Monitor - q to quit", annotated)
                     if cv2.waitKey(1) & 0xFF == ord("q"):

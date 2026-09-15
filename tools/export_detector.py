@@ -5,7 +5,7 @@ import argparse
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export YOLO pose detector to OpenVINO")
-    parser.add_argument("--model", default="yolo8n-pose.pt")
+    parser.add_argument("--model", default="yolov8n-pose.pt")
     parser.add_argument("--image-size", type=int, default=416)
     parser.add_argument("--int8", action="store_true")
     parser.add_argument("--data", help="Calibration dataset YAML required for meaningful INT8 calibration")

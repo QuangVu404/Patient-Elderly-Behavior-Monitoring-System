@@ -6,7 +6,7 @@ video:
   display: true
 
 detector:
-  model: yolo8n-pose.pt
+  model: yolov8n-pose.pt
   device: cpu
   image_size: 416
   confidence: 0.30
@@ -16,6 +16,7 @@ detector:
 sequence:
   length: 32
   minimum_frames: 12
+  sample_fps: 10.0              # must match the feature-cache training rate
   keypoint_confidence: 0.25
   stale_track_seconds: 2.0
 

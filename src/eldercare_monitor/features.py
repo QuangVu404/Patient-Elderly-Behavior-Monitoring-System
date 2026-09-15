@@ -7,7 +7,6 @@ import numpy as np
 
 from .types import TrackedPose
 
-
 KEYPOINT_COUNT = 17
 FEATURE_DIM = KEYPOINT_COUNT * 5 + 4
 
@@ -81,4 +80,3 @@ class SequenceStore:
         for track_id in stale:
             self._poses.pop(track_id, None)
             self._features.pop(track_id, None)
-

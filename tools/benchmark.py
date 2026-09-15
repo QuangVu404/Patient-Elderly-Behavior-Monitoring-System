@@ -13,7 +13,7 @@ from eldercare_monitor.detector import UltralyticsPoseTracker
 def main() -> None:
     parser = argparse.ArgumentParser(description="Measure end-to-end detector/tracker latency")
     parser.add_argument("--source", default="0")
-    parser.add_argument("--model", default="yolo8n-pose.pt")
+    parser.add_argument("--model", default="yolov8n-pose.pt")
     parser.add_argument("--image-size", type=int, default=416)
     parser.add_argument("--frames", type=int, default=300)
     parser.add_argument("--warmup", type=int, default=20)
@@ -50,4 +50,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

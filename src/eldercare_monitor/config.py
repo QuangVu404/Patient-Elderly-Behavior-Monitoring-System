@@ -18,7 +18,7 @@ class VideoConfig:
 
 @dataclass(slots=True)
 class DetectorConfig:
-    model: str = "yolo8n-pose.pt"
+    model: str = "yolov8n-pose.pt"
     device: str = "cpu"
     image_size: int = 416
     confidence: float = 0.30
@@ -30,6 +30,7 @@ class DetectorConfig:
 class SequenceConfig:
     length: int = 32
     minimum_frames: int = 12
+    sample_fps: float = 10.0
     keypoint_confidence: float = 0.25
     stale_track_seconds: float = 2.0
 

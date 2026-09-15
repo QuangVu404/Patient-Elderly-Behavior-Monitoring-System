@@ -13,6 +13,8 @@ dependencies = [
   "opencv-python>=4.8",
   "PyYAML>=6.0",
   "ultralytics>=8.3",
+  "lap>=0.5.12",
+  "streamlit>=1.40",
 ]
 
 [project.optional-dependencies]
@@ -33,4 +35,3 @@ pythonpath = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-

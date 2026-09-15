@@ -14,8 +14,7 @@ from eldercare_monitor.features import FEATURE_DIM, SequenceStore
 
 def iter_rows(manifest: Path):
     with manifest.open("r", encoding="utf-8-sig", newline="") as handle:
-        for row in csv.DictReader(handle):
-            yield row
+        yield from csv.DictReader(handle)
 
 
 def extract_row(row: dict[str, str], args: argparse.Namespace) -> list[np.ndarray]:
@@ -59,7 +58,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build temporal pose windows from a CSV manifest")
     parser.add_argument("manifest")
     parser.add_argument("--output", default="data/processed/sequences.npz")
-    parser.add_argument("--model", default="yolo8n-pose.pt")
+    parser.add_argument("--model", default="yolov8n-pose.pt")
     parser.add_argument("--image-size", type=int, default=416)
     parser.add_argument("--sample-fps", type=float, default=10.0)
     parser.add_argument("--sequence-length", type=int, default=32)
@@ -93,4 +92,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

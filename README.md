@@ -4,14 +4,14 @@ Starter project cho pipeline thời gian thực:
 
 ```text
 Camera / RTSP
-      ↓
+      v
 YOLOv8n-Pose + ByteTrack
-      ↓
+      v
 Chuẩn hóa 17 keypoint + vận tốc + hình học bbox
-      ↓
+      v
 Temporal Conv1D + Attention Pooling (hoặc heuristic bootstrap)
-      ↓
-Xác nhận nhiều frame + cooldown → cảnh báo JSONL / snapshot tùy chọn
+      v
+Xác nhận nhiều frame + cooldown -> cảnh báo JSONL / snapshot tùy chọn
 ```
 
 Mục tiêu của mã nguồn là tạo một baseline đo được và dễ thay thế từng phần trên máy chỉ có CPU. Nó nhận diện hai sự kiện: `fall` (nguy cơ ngã) và `immobility` (nằm ngang ít chuyển động quá lâu). Đây **không phải thiết bị y tế**; trước triển khai thật cần kiểm định tại đúng phòng, góc camera và nhóm người sử dụng.
@@ -22,7 +22,7 @@ Mục tiêu của mã nguồn là tạo một baseline đo được và dễ tha
 - YOLOv8n-Pose và ByteTrack qua `model.track(..., persist=True, tracker="bytetrack.yaml")`.
 - Vector đặc trưng 89 chiều/frame: tọa độ chuẩn hóa, confidence, vận tốc keypoint và hình học bbox.
 - Cửa sổ temporal tách biệt theo `track_id`, tự dọn track mất quá lâu.
-- Mạng rất nhỏ: projection → depthwise temporal Conv1D → learned attention pooling → 2 lớp `normal/fall`.
+- Mạng rất nhỏ: projection -> depthwise temporal Conv1D -> learned attention pooling -> 2 lớp `normal/fall`.
 - Chế độ heuristic để chạy thử khi chưa có checkpoint; không nên dùng làm ngưỡng production.
 - Debounce, cooldown, phát hiện nằm bất động theo thời gian thực tế, JSONL audit log và snapshot opt-in.
 - Công cụ tạo dataset, train theo group/subject để tránh leakage, xuất OpenVINO FP16/INT8 và benchmark.
@@ -40,13 +40,36 @@ python -m pip install --upgrade pip
 pip install -e .
 ```
 
-Lần chạy đầu, Ultralytics sẽ tải `yolo8n-pose.pt`; môi trường triển khai offline cần tải model trước và đổi `detector.model` thành đường dẫn local.
+Ứng dụng local cần checkpoint `yolov8n-pose.pt` tại đường dẫn `detector.model`. Riêng pipeline
+Kaggle không tự lấy checkpoint qua mạng: hãy gắn Code Input đã chứa file này theo
+[`training/README.md`](training/README.md).
 
-Chạy webcam:
+Nếu đã có output notebook 07 trong `training/eldercare_training`, cài bundle một lần:
 
 ```powershell
-eldercare-monitor --config configs/default.yaml --source 0
+python tools/install_training_bundle.py training/eldercare_training --classifier-backend pytorch --force
 ```
+
+Lệnh này tạo `configs/trained.yaml` với đúng YOLO-Pose, classifier đã chọn, độ dài cửa sổ,
+sample FPS và threshold từ lần train. Chạy webcam bằng CLI:
+
+```powershell
+eldercare-monitor --config configs/trained.yaml --source 0
+```
+
+Chạy giao diện Streamlit:
+
+```powershell
+streamlit run streamlit_app.py
+```
+
+Streamlit tự ưu tiên `configs/trained.yaml` nếu file tồn tại; nếu không, ứng dụng dùng
+`configs/default.yaml`. Có thể ép một config khác bằng biến môi trường `ELDERCARE_CONFIG`.
+Trong trình duyệt, có thể tải video hoặc nhập `0` cho webcam, đường dẫn video hay URL RTSP.
+
+Cấu hình trên dùng checkpoint PyTorch có sẵn trong output 07 nên chạy được ngay với dependency
+cơ bản. Để tối ưu CPU bằng OpenVINO, cài `pip install -e ".[openvino]"`, rồi chạy lại lệnh cài
+bundle với `--classifier-backend openvino`.
 
 Chạy video hoặc RTSP:
 
@@ -58,6 +81,20 @@ eldercare-monitor --source "rtsp://user:password@camera/stream" --headless
 Không ghi URL chứa mật khẩu vào config được commit. Nhấn `q` để thoát giao diện. Sự kiện nằm tại `artifacts/events.jsonl`.
 
 ## Dữ liệu và huấn luyện
+
+Pipeline Kaggle nhiều stage dùng profile `kaggle_rgb_5` gồm FallVision, CAUCAFall, URFD,
+MCFD và UCF101 nằm trong [`training/`](training/).
+Classifier temporal trong notebook là mô hình tự xây dựng và được train từ đầu. YOLO-Pose
+vẫn chỉ đảm nhiệm trích 17 keypoint, nhưng có thể fine-tune bằng nhãn pose thật hoặc
+pseudo-label lấy riêng từ training groups. Xem hướng dẫn và schema nhãn tại
+[`training/README.md`](training/README.md).
+
+Để smoke-test toàn bộ pipeline trong một session, dùng
+[`training/all_in_one_demo_kaggle.ipynb`](training/all_in_one_demo_kaggle.ipynb).
+Để train đầy đủ năm nguồn và có thể tiếp tục khi một session bị ngắt, dùng bộ notebook stage bắt đầu từ
+[`training/00_build_manifest_kaggle.ipynb`](training/00_build_manifest_kaggle.ipynb)
+và kết thúc tại
+[`training/07_train_temporal_kaggle.ipynb`](training/07_train_temporal_kaggle.ipynb).
 
 Không trộn ngẫu nhiên clip/frame của cùng một người vào cả train và validation. Cột `subject` trong manifest là đơn vị group split. Với UR Fall hoặc video tự quay, tạo manifest theo [mẫu](data/manifest.example.csv):
 
@@ -124,10 +161,21 @@ analysis:
   classifier_model: artifacts/temporal_openvino_int8/model.xml
 ```
 
+Nếu dùng output đầy đủ của Kaggle stage 07, có thể tạo config đã liên kết pose model, classifier,
+sequence length và threshold tự động:
+
+```powershell
+python tools/install_training_bundle.py path/to/eldercare_training
+eldercare-monitor --config configs/trained.yaml --source 0
+```
+
+Config sinh ra buộc runtime dùng đủ sequence và đúng sample FPS như lúc tạo cache, tránh lệch miền
+thời gian giữa video huấn luyện và camera triển khai.
+
 Xuất pose detector sang OpenVINO:
 
 ```powershell
-python tools/export_detector.py --model yolo8n-pose.pt --image-size 416
+python tools/export_detector.py --model yolov8n-pose.pt --image-size 416
 ```
 
 Lệnh trả về thư mục model; dùng đường dẫn đó tại `detector.model`. INT8 cần YAML của tập ảnh calibration đại diện:
@@ -141,7 +189,7 @@ Tài liệu tích hợp chính thức của Ultralytics mô tả export/inferenc
 ## Benchmark và tuning CPU
 
 ```powershell
-python tools/benchmark.py --source data/raw/demo.mp4 --model yolo8n-pose.pt `
+python tools/benchmark.py --source data/raw/demo.mp4 --model yolov8n-pose.pt `
   --image-size 416 --frames 300
 ```
 
@@ -152,7 +200,7 @@ So sánh cùng video, cùng số frame và bỏ warm-up. Ghi lại ít nhất me
 3. Nếu vẫn thiếu FPS, tăng `process_every_n_frames` lên 2; thời gian sự kiện vẫn dùng clock thực.
 4. Chỉ pruning sau khi PTQ chưa đạt mục tiêu và có quy trình fine-tune/đánh giá lại.
 
-Không khẳng định trước mức “tiết kiệm 90%”; hãy báo cáo tỷ lệ đo trên phần cứng đích so với baseline pixel-video (ví dụ CNN 3D) bằng cùng dữ liệu và tiêu chí.
+Không khẳng định trước mức "tiết kiệm 90%"; hãy báo cáo tỷ lệ đo trên phần cứng đích so với baseline pixel-video (ví dụ CNN 3D) bằng cùng dữ liệu và tiêu chí.
 
 ## Kiểm thử
 
@@ -186,7 +234,7 @@ src/eldercare_monitor/features.py    chuẩn hóa và cửa sổ temporal
 src/eldercare_monitor/model.py       Temporal Attention 1D
 src/eldercare_monitor/analyzer.py    state machine ngã/bất động
 src/eldercare_monitor/pipeline.py    vòng lặp end-to-end
-tools/prepare_dataset.py             video manifest → NPZ
+tools/prepare_dataset.py             video manifest -> NPZ
 tools/train_classifier.py            train/group validation
 tools/evaluate_classifier.py         đánh giá hold-out
 tools/export_openvino.py             FP16/INT8 classifier
