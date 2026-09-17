@@ -356,6 +356,103 @@ def test_confirmed_alert_metrics_count_consecutive_negative_alerts_as_false() ->
     assert metrics["alert_precision"] == 0.0
 
 
+def test_select_operational_policy_enforces_false_alarm_and_recall_targets() -> None:
+    predictions = pd.DataFrame(
+        {
+            "dataset": ["A"] * 12,
+            "source": ["fall"] * 6 + ["normal"] * 6,
+            "window_time": list(map(float, range(6))) * 2,
+            "label": [1] * 6 + [0] * 6,
+            "probability": [0.8] * 6 + [0.6, 0.6, 0.6, 0.1, 0.1, 0.1],
+        }
+    )
+
+    threshold, confirm_frames, policy, audit = ks.select_operational_policy(
+        predictions,
+        np.asarray([0.5, 0.7]),
+        confirm_frame_candidates=(3,),
+        target_false_alarms_per_hour=0.0,
+        minimum_labeled_event_recall=1.0,
+    )
+
+    assert threshold == 0.7
+    assert confirm_frames == 3
+    assert policy["selection_status"] == "constraints_met"
+    assert policy["validation_metrics"]["false_alarms_per_hour"] == 0.0
+    assert len(audit) == 2
+
+
+def test_select_operational_policy_reports_unmet_false_alarm_target() -> None:
+    predictions = pd.DataFrame(
+        {
+            "source": ["fall"] * 3 + ["normal"] * 3,
+            "window_time": [0.0, 1.0, 2.0] * 2,
+            "label": [1, 1, 1, 0, 0, 0],
+            "probability": [0.9] * 6,
+        }
+    )
+
+    _, _, policy, _ = ks.select_operational_policy(
+        predictions,
+        np.asarray([0.5]),
+        confirm_frame_candidates=(3,),
+        target_false_alarms_per_hour=0.0,
+        minimum_labeled_event_recall=1.0,
+    )
+
+    assert policy["selection_status"] == "false_alarm_target_not_met"
+
+
+def test_operational_policy_protects_a_difficult_validation_dataset() -> None:
+    rows = []
+    for dataset, count, probability in [("easy", 10, 0.9), ("hard", 5, 0.6)]:
+        for source in range(count):
+            for timestamp in range(3):
+                rows.append(
+                    {
+                        "dataset": dataset,
+                        "group": f"g{source}",
+                        "source": f"{dataset}_{source}",
+                        "window_time": float(timestamp),
+                        "label": 1,
+                        "probability": probability,
+                    }
+                )
+    predictions = pd.DataFrame(rows)
+    threshold, _, policy, audit = ks.select_operational_policy(
+        predictions,
+        np.asarray([0.5, 0.7]),
+        confirm_frame_candidates=(3,),
+        minimum_labeled_event_recall=0.6,
+        recall_safety_margin=0.0,
+    )
+
+    assert threshold == 0.5
+    assert "dataset:hard" in policy["validation_stress_cohorts"]
+    assert audit.loc[audit["threshold"] == 0.7, "worst_cohort_event_recall"].iloc[0] == 0.0
+
+
+def test_operational_policy_adds_pooled_recall_safety_margin() -> None:
+    predictions = pd.DataFrame(
+        {
+            "source": [f"s{index}" for index in range(10) for _ in range(3)],
+            "window_time": [0.0, 1.0, 2.0] * 10,
+            "label": [1] * 30,
+            "probability": [0.9] * 27 + [0.6] * 3,
+        }
+    )
+    threshold, _, policy, _ = ks.select_operational_policy(
+        predictions,
+        np.asarray([0.5, 0.7]),
+        confirm_frame_candidates=(3,),
+        minimum_labeled_event_recall=0.85,
+        recall_safety_margin=0.10,
+    )
+
+    assert threshold == 0.5
+    assert policy["required_pooled_recall"] == 0.95
+
+
 def test_frame_label_uses_dense_segments() -> None:
     segments = "[[0, 0.0, 1.0], [1, 1.0, 2.0], [2, 2.0, 3.0]]"
     assert ks.frame_label(0.5, -2, segments) == 0

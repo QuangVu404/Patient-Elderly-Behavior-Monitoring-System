@@ -180,10 +180,15 @@ hoặc output stage 00. Pose checkpoint stage 01 được kiểm tra SHA rồi �
    tránh lớp chiếm đa số nuốt toàn bộ ngân sách RAM.
 4. Train `MultiScaleTemporalGRU` từ đầu với weighted sampling, temporal/feature masking,
    label smoothing, gradient clipping và cosine learning-rate schedule.
-5. Mine 20% negative có xác suất fall cao nhất và fine-tune ngắn với learning rate thấp; chỉ giữ
-   checkpoint mới khi validation Average Precision tăng.
-6. Chọn epoch bằng Average Precision không phụ thuộc threshold; sau đó tối ưu decision threshold
-   bằng ba dự đoán liên tiếp và cooldown giống runtime.
+5. Xếp hạng các video hoàn toàn non-fall theo xác suất fall lớn nhất, lấy 20% video khó nhất rồi
+   fine-tune ngắn trên toàn bộ window của chúng với learning rate thấp; chỉ giữ checkpoint mới khi
+   validation Average Precision tăng.
+6. Chọn epoch bằng Average Precision không phụ thuộc threshold; sau đó tìm đồng thời decision
+   threshold và confirmation 3/4/5 frame giống runtime. Ưu tiên cấu hình có event recall ít nhất
+   0,85 và false alarms/hour không quá 5; ghi rõ trạng thái nếu validation không đạt ràng buộc.
+   Thêm biên recall 0,05 cho pooled validation và kiểm tra recall riêng từng dataset/nhóm group
+   có ít nhất năm source fall. Đây là validation stress check, không phải train cross-validation.
+   Metric nhóm nhỏ vẫn được ghi để chẩn đoán nhưng không dùng làm ràng buộc cứng.
 7. Đánh giá test ở mức window, cảnh báo vận hành, source và group/label; đồng thời báo cáo các mức riêng theo dataset.
    Với nguồn chỉ có một lớp, đọc recall hoặc specificity/FPR thay vì F1 hai lớp.
 8. Lưu checkpoint và tùy chọn xuất ONNX/OpenVINO.
@@ -197,6 +202,7 @@ hoặc output stage 00. Pose checkpoint stage 01 được kiểm tra SHA rồi �
 - `metrics.json`
 - `test_predictions.csv`
 - `operational_test_predictions.csv`
+- `operational_policy_audit.csv`
 - `confusion_matrix.csv`
 - `deployment_manifest.json`
 - `windowing_audit.json`

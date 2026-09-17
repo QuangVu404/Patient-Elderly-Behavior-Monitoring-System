@@ -264,11 +264,26 @@ gradient clipping và cosine learning-rate schedule. Checkpoint ghi `model_name`
 evaluate/export vẫn đọc được cả model cũ lẫn model mới.
 
 Pipeline chọn epoch bằng Average Precision, không phụ thuộc threshold và ổn định hơn khi xác suất
-chưa được calibration. Sau khi khóa epoch tốt nhất, threshold chỉ được tối ưu một lần trên
-validation bằng chính sách ba dự đoán liên tiếp và cooldown 15 giây giống runtime. Sau training
-chính, ba epoch learning rate thấp ưu tiên 20% negative có xác suất fall cao nhất; checkpoint chỉ
-được thay nếu validation AP tốt hơn. Metric source/group riêng cho từng dataset nằm trong
-`per_dataset_aggregates`.
+chưa được calibration. Sau khi khóa epoch tốt nhất, pipeline tìm đồng thời threshold và số dự đoán
+liên tiếp (mặc định 3, 4 hoặc 5) trên validation. Chính sách được chọn phải ưu tiên giữ event recall
+tối thiểu 0,85 và false alarms/hour không quá 5; nếu validation không có phương án đạt cả hai,
+`selection_status` ghi rõ ràng ràng buộc nào chưa đạt thay vì âm thầm chọn một cấu hình kém an toàn.
+Cooldown vẫn là 15 giây giống runtime. Sau training chính, ba epoch learning rate thấp ưu tiên toàn bộ
+window thuộc 20% video non-fall gây xác suất fall cao nhất; checkpoint chỉ được thay nếu validation AP
+tốt hơn. Metric source/group riêng cho từng dataset nằm trong `per_dataset_aggregates`.
+
+Bộ chọn policy có thêm `recall_safety_margin=0.05`: mặc định yêu cầu pooled validation event recall
+ít nhất 0,90. Đồng thời, recall của từng dataset và ba nhóm stress validation phải ít nhất 0,85.
+Các nhóm stress được chia luân phiên theo group bên trong từng dataset, không tách một group sang
+nhiều nhóm; chỉ nhóm có ít nhất năm source fall mới tham gia ràng buộc recall. Metric của mọi nhóm,
+kể cả nhóm nhỏ, nằm trong `training_strategy.operational_policy.validation_cohort_metrics`.
+Đây là kiểm tra độ ổn định trên validation của một checkpoint, không phải cross-validation train
+lại nhiều model; không dùng test để chọn threshold. Nếu không đạt ràng buộc, pipeline vẫn xuất
+candidate và in `POLICY WARNING`, không xác nhận model đã sẵn sàng triển khai.
+
+Để áp dụng thay đổi này, cập nhật Code Dataset trên Kaggle, khởi động lại session rồi chạy lại 07
+với output 01 và 02-06 hiện có. Không cần tạo lại pose/cache nếu chúng không đổi. Giữ output cũ
+để so event recall, số false alerts và thời lượng negative monitoring, không chỉ accuracy/F1.
 
 Metric theo dataset gồm accuracy, balanced accuracy, precision, recall, F1, specificity và false
 positive rate. Với UCF101 chỉ chứa non-fall, hãy đọc specificity/FPR; F1 của riêng nguồn này không
@@ -280,7 +295,9 @@ alert model đã phát, không sử dụng ground-truth tại thời điểm ale
 threshold triển khai; metric dùng max probability trên cả source/group chỉ giữ vai trò chẩn đoán
 các nguồn có spike.
 Phép đo vận hành chạy cửa sổ dày với stride 1 giống runtime; kết quả chi tiết nằm trong
-`operational_test_predictions.csv`.
+`operational_test_predictions.csv`. Toàn bộ cấu hình ứng viên trên validation được ghi vào
+`operational_policy_audit.csv`; metric vận hành tách theo dataset nằm ở `per_dataset_operational`
+trong `metrics.json`.
 
 Ngoài metric theo window, `metrics.json` còn có metric theo source và theo cặp group/label để giảm
 ảo tưởng do các cửa sổ chồng lấn. `test_predictions.csv` chứa thêm thời điểm giữa cửa sổ.

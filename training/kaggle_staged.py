@@ -1451,7 +1451,10 @@ def confirmed_alert_metrics(
     positive_event_sources = 0
     detected_positive_event_sources = 0
     negative_seconds = 0.0
-    for _, source_rows in predictions.groupby("source", sort=False):
+    source_keys = ["source"]
+    if "dataset" in predictions.columns:
+        source_keys.insert(0, "dataset")
+    for _, source_rows in predictions.groupby(source_keys, sort=False):
         source_rows = source_rows.sort_values("window_time")
         labels = source_rows["label"].to_numpy(dtype=np.int64)
         probabilities = source_rows["probability"].to_numpy(dtype=np.float64)
@@ -1505,6 +1508,159 @@ def confirmed_alert_metrics(
         }
     )
     return metrics
+
+
+def select_operational_policy(
+    predictions: pd.DataFrame,
+    thresholds: np.ndarray,
+    confirm_frame_candidates: tuple[int, ...] = (3, 4, 5),
+    cooldown_seconds: float = 15.0,
+    target_false_alarms_per_hour: float = 5.0,
+    minimum_labeled_event_recall: float = 0.85,
+    recall_safety_margin: float = 0.05,
+    minimum_cohort_positive_sources: int = 5,
+) -> tuple[float, int, dict[str, Any], pd.DataFrame]:
+    """Select a runtime policy with explicit false-alarm and recall constraints."""
+    if predictions.empty:
+        raise ValueError("Cannot select an operational policy from empty predictions")
+    if len(thresholds) == 0:
+        raise ValueError("thresholds cannot be empty")
+    if not confirm_frame_candidates or any(value < 1 for value in confirm_frame_candidates):
+        raise ValueError("confirm_frame_candidates must contain positive integers")
+    if target_false_alarms_per_hour < 0:
+        raise ValueError("target_false_alarms_per_hour cannot be negative")
+    if not 0.0 <= minimum_labeled_event_recall <= 1.0:
+        raise ValueError("minimum_labeled_event_recall must be in [0, 1]")
+    if not 0.0 <= recall_safety_margin <= 1.0:
+        raise ValueError("recall_safety_margin must be in [0, 1]")
+    if minimum_cohort_positive_sources < 1:
+        raise ValueError("minimum_cohort_positive_sources must be positive")
+
+    # Validation-only stress checks, not independent cross-validation training.
+    # Keep every group together, and exclude tiny positive cohorts from hard
+    # constraints: one missed event should not decide the global policy.
+    cohorts: dict[str, pd.DataFrame] = {}
+    diagnostic_cohorts: dict[str, pd.DataFrame] = {}
+    if "dataset" in predictions and "group" in predictions:
+        fold_parts: dict[int, list[pd.DataFrame]] = defaultdict(list)
+        for dataset, dataset_rows in predictions.groupby("dataset", sort=True):
+            cohorts[f"dataset:{dataset}"] = dataset_rows
+            group_names = sorted(dataset_rows["group"].astype(str).unique())
+            for index, group in enumerate(group_names):
+                fold_parts[index % 3].append(
+                    dataset_rows[dataset_rows["group"].astype(str) == group]
+                )
+        for fold, parts in fold_parts.items():
+            cohorts[f"group_fold:{fold}"] = pd.concat(parts, ignore_index=True)
+        diagnostic_cohorts = cohorts.copy()
+        cohorts = {
+            name: cohort
+            for name, cohort in cohorts.items()
+            if int(
+                (cohort.groupby(["dataset", "source"])["label"].max() == 1).sum()
+            ) >= minimum_cohort_positive_sources
+        }
+    required_pooled_recall = min(
+        1.0, minimum_labeled_event_recall + recall_safety_margin
+    )
+
+    rows: list[dict[str, Any]] = []
+    for candidate_confirm_frames in sorted(set(confirm_frame_candidates)):
+        for threshold in sorted({float(value) for value in thresholds}):
+            metrics = confirmed_alert_metrics(
+                predictions,
+                threshold,
+                candidate_confirm_frames,
+                cooldown_seconds,
+            )
+            cohort_recalls = [
+                confirmed_alert_metrics(
+                    cohort, threshold, candidate_confirm_frames, cooldown_seconds
+                )["labeled_event_recall"]
+                for cohort in cohorts.values()
+            ]
+            rows.append(
+                {
+                    "threshold": threshold,
+                    "confirm_frames": int(candidate_confirm_frames),
+                    **metrics,
+                    "worst_cohort_event_recall": float(
+                        min(cohort_recalls, default=metrics["labeled_event_recall"])
+                    ),
+                }
+            )
+    audit = pd.DataFrame(rows)
+    meets_recall = (
+        (audit["labeled_event_recall"] >= required_pooled_recall)
+        & (audit["worst_cohort_event_recall"] >= minimum_labeled_event_recall)
+    )
+    meets_false_alarm_target = (
+        audit["false_alarms_per_hour"] <= target_false_alarms_per_hour
+    )
+    feasible = audit[meets_recall & meets_false_alarm_target]
+    if not feasible.empty:
+        candidates = feasible
+        selection_status = "constraints_met"
+        sort_columns = [
+            "f1", "alert_precision", "labeled_event_recall",
+            "false_alarms_per_hour", "confirm_frames", "threshold",
+        ]
+        ascending = [False, False, False, True, True, False]
+    elif meets_recall.any():
+        # Preserve event recall, then choose the least unsafe false-alarm rate.
+        candidates = audit[meets_recall]
+        selection_status = "false_alarm_target_not_met"
+        sort_columns = [
+            "false_alarms_per_hour", "f1", "alert_precision",
+            "confirm_frames", "threshold",
+        ]
+        ascending = [True, False, False, True, False]
+    else:
+        # Do not silently deploy a zero-alert policy when the recall floor fails.
+        candidates = audit
+        selection_status = "recall_target_not_met"
+        sort_columns = [
+            "worst_cohort_event_recall", "labeled_event_recall", "false_alarms_per_hour", "f1",
+            "alert_precision", "confirm_frames", "threshold",
+        ]
+        ascending = [False, False, True, False, False, True, False]
+    selected = candidates.sort_values(sort_columns, ascending=ascending).iloc[0]
+    policy = {
+        "selection_status": selection_status,
+        "target_false_alarms_per_hour": float(target_false_alarms_per_hour),
+        "minimum_labeled_event_recall": float(minimum_labeled_event_recall),
+        "required_pooled_recall": float(required_pooled_recall),
+        "recall_safety_margin": float(recall_safety_margin),
+        "validation_stress_cohorts": list(cohorts),
+        "minimum_cohort_positive_sources": minimum_cohort_positive_sources,
+        "validation_cohort_metrics": {
+            name: {
+                "used_as_recall_constraint": name in cohorts,
+                **confirmed_alert_metrics(
+                    cohort,
+                    float(selected["threshold"]),
+                    int(selected["confirm_frames"]),
+                    cooldown_seconds,
+                ),
+            }
+            for name, cohort in diagnostic_cohorts.items()
+        },
+        "validation_metrics": {
+            key: float(selected[key])
+            for key in (
+                "f1", "specificity", "false_positive_rate",
+                "false_alarms_per_hour", "alert_precision",
+                "labeled_event_recall", "negative_monitoring_hours",
+                "worst_cohort_event_recall",
+            )
+        },
+    }
+    return (
+        float(selected["threshold"]),
+        int(selected["confirm_frames"]),
+        policy,
+        audit,
+    )
 
 
 def collect_probabilities(model: nn.Module, loader: DataLoader, device: str) -> tuple[np.ndarray, np.ndarray]:
@@ -1644,7 +1800,12 @@ def stage07_train_temporal(
     hard_negative_fraction: float = 0.20,
     hard_negative_boost: float = 3.0,
     confirm_frames: int = 3,
+    confirm_frame_candidates: tuple[int, ...] | None = None,
     cooldown_seconds: float = 15.0,
+    target_false_alarms_per_hour: float = 5.0,
+    minimum_labeled_event_recall: float = 0.85,
+    recall_safety_margin: float = 0.05,
+    minimum_cohort_positive_sources: int = 5,
     workers: int = 0,
     export_models: bool = True,
     seed: int = 42,
@@ -1657,6 +1818,22 @@ def stage07_train_temporal(
         raise ValueError("hard_negative_fraction must be in (0, 1]")
     if hard_negative_boost < 1.0:
         raise ValueError("hard_negative_boost must be at least 1")
+    if confirm_frames < 1:
+        raise ValueError("confirm_frames must be positive")
+    if confirm_frame_candidates is None:
+        confirm_frame_candidates = tuple(range(confirm_frames, confirm_frames + 3))
+    if not confirm_frame_candidates or any(value < 1 for value in confirm_frame_candidates):
+        raise ValueError("confirm_frame_candidates must contain positive integers")
+    if cooldown_seconds < 0:
+        raise ValueError("cooldown_seconds cannot be negative")
+    if target_false_alarms_per_hour < 0:
+        raise ValueError("target_false_alarms_per_hour cannot be negative")
+    if not 0.0 <= minimum_labeled_event_recall <= 1.0:
+        raise ValueError("minimum_labeled_event_recall must be in [0, 1]")
+    if not 0.0 <= recall_safety_margin <= 1.0:
+        raise ValueError("recall_safety_margin must be in [0, 1]")
+    if minimum_cohort_positive_sources < 1:
+        raise ValueError("minimum_cohort_positive_sources must be positive")
     seed_everything(seed)
     input_root, output_dir = Path(input_root), Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1838,12 +2015,33 @@ def stage07_train_temporal(
         )
         _, train_probabilities = collect_probabilities(model, train_eval_loader, device)
         train_labels = y[train_mask]
-        negative_probabilities = train_probabilities[train_labels == 0]
-        if len(negative_probabilities):
-            cutoff = float(
-                np.quantile(negative_probabilities, 1.0 - hard_negative_fraction)
+        train_sources = sources[train_mask]
+        entirely_negative_sources = {
+            str(source)
+            for source in np.unique(train_sources)
+            if np.all(train_labels[train_sources == source] == 0)
+        }
+        if entirely_negative_sources:
+            source_scores = sorted(
+                (
+                    float(np.max(train_probabilities[train_sources == source])),
+                    str(source),
+                )
+                for source in entirely_negative_sources
             )
-            hard_negative_mask = (train_labels == 0) & (train_probabilities >= cutoff)
+            selected_source_count = max(
+                1, int(np.ceil(len(source_scores) * hard_negative_fraction))
+            )
+            selected_hard_sources = {
+                source for _, source in source_scores[-selected_source_count:]
+            }
+            hard_negative_mask = np.asarray(
+                [
+                    label == 0 and str(source) in selected_hard_sources
+                    for label, source in zip(train_labels, train_sources)
+                ],
+                dtype=bool,
+            )
             hard_weights = weights.copy()
             hard_weights[hard_negative_mask] *= hard_negative_boost
             hard_sampler = WeightedRandomSampler(
@@ -1894,7 +2092,8 @@ def stage07_train_temporal(
                 print(
                     f"hard_epoch={hard_epoch:02d} loss={np.mean(hard_losses):.4f} "
                     f"val_ap={current_average_precision:.4f} "
-                    f"hard_negatives={int(hard_negative_mask.sum())}"
+                    f"hard_negative_sources={len(selected_hard_sources)} "
+                    f"hard_negative_windows={int(hard_negative_mask.sum())}"
                 )
             model.load_state_dict(best_state)
     validation_predictions = collect_dense_split_predictions(
@@ -1905,7 +2104,6 @@ def stage07_train_temporal(
         batch_size * 2,
         device,
     )
-    dense_val_labels = validation_predictions["label"].to_numpy(dtype=np.int64)
     dense_val_probabilities = validation_predictions["probability"].to_numpy(
         dtype=np.float64
     )
@@ -1923,21 +2121,24 @@ def stage07_train_temporal(
             0.99,
         )
     )
-    best_threshold = max(
-        thresholds,
-        key=lambda threshold: (
-            confirmed_alert_metrics(
-                validation_predictions,
-                float(threshold),
-                confirm_frames,
-                cooldown_seconds,
-            )["f1"],
-            metric_dict(
-                dense_val_labels, dense_val_probabilities, float(threshold)
-            )["specificity"],
-            threshold,
-        ),
+    best_threshold, selected_confirm_frames, operational_policy, policy_audit = (
+        select_operational_policy(
+            validation_predictions,
+            thresholds,
+            confirm_frame_candidates,
+            cooldown_seconds,
+            target_false_alarms_per_hour,
+            minimum_labeled_event_recall,
+            recall_safety_margin,
+            minimum_cohort_positive_sources,
+        )
     )
+    if operational_policy["selection_status"] != "constraints_met":
+        print(
+            "[POLICY WARNING] Validation constraints were not all met: "
+            f"{operational_policy['selection_status']}. "
+            "This policy is an evaluation candidate, not a production approval."
+        )
     test_labels, test_probabilities = collect_probabilities(model, test_loader, device)
     test_metrics = metric_dict(test_labels, test_probabilities, float(best_threshold))
     test_datasets = datasets[test_mask]
@@ -1966,17 +2167,26 @@ def stage07_train_temporal(
     operational_metrics = confirmed_alert_metrics(
         operational_test_predictions,
         float(best_threshold),
-        confirm_frames,
+        selected_confirm_frames,
         cooldown_seconds,
     )
     per_dataset = {}
     per_dataset_aggregates = {}
+    per_dataset_operational = {}
     for dataset in sorted(set(test_datasets)):
         mask = test_datasets == dataset
         per_dataset[dataset] = metric_dict(test_labels[mask], test_probabilities[mask], float(best_threshold))
         per_dataset_aggregates[dataset] = aggregate_prediction_metrics(
             test_prediction_frame[test_prediction_frame["dataset"] == dataset],
             float(best_threshold),
+        )
+        per_dataset_operational[dataset] = confirmed_alert_metrics(
+            operational_test_predictions[
+                operational_test_predictions["dataset"] == dataset
+            ],
+            float(best_threshold),
+            selected_confirm_frames,
+            cooldown_seconds,
         )
     results = {
         "seed": seed,
@@ -1990,15 +2200,18 @@ def stage07_train_temporal(
             "hard_negative_epochs": hard_negative_epochs,
             "hard_negative_fraction": hard_negative_fraction,
             "hard_negative_boost": hard_negative_boost,
-            "threshold_metric": "confirmed_source_f1",
-            "confirm_frames": confirm_frames,
+            "threshold_metric": "constrained_operational_policy",
+            "confirm_frame_candidates": list(confirm_frame_candidates),
+            "confirm_frames": selected_confirm_frames,
             "cooldown_seconds": cooldown_seconds,
+            "operational_policy": operational_policy,
         },
         "test": test_metrics,
         "test_aggregates": aggregate_metrics,
         "operational_test": operational_metrics,
         "per_dataset": per_dataset,
         "per_dataset_aggregates": per_dataset_aggregates,
+        "per_dataset_operational": per_dataset_operational,
         "cache_shards": [str(path) for path in manifest_paths],
     }
     checkpoint = output_dir / "temporal_attention.pt"
@@ -2023,6 +2236,7 @@ def stage07_train_temporal(
     operational_test_predictions.to_csv(
         output_dir / "operational_test_predictions.csv", index=False
     )
+    policy_audit.to_csv(output_dir / "operational_policy_audit.csv", index=False)
     np.savetxt(output_dir / "confusion_matrix.csv", confusion_matrix(test_labels, test_probabilities >= best_threshold), fmt="%d", delimiter=",")
 
     if export_models:
@@ -2051,7 +2265,7 @@ def stage07_train_temporal(
         "sample_fps": float(manifest["sample_fps"].iloc[0]),
         "fall_threshold": float(best_threshold),
         "required_runtime_policy": "full_window_before_classification",
-        "confirm_frames": confirm_frames,
+        "confirm_frames": selected_confirm_frames,
         "cooldown_seconds": cooldown_seconds,
     }
     (output_dir / "deployment_manifest.json").write_text(
